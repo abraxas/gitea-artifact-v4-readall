@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="header.png" alt="Abraxas Labs — gitea-artifact-v4-readall" width="100%">
+  <img src="header.png" alt="Abraxas Labs - gitea-artifact-v4-readall" width="100%">
 </p>
 
 <p align="center">
@@ -14,148 +14,64 @@
 
 # gitea-artifact-v4-readall
 
-**Gitea** `1.27.3` — Gitea
+**Gitea** `1.27.3` - Gitea
 
-Unpublished Gitea source finding: artifact v4 unbounded io.ReadAll.
+[`job_summary.go`](https://github.com/go-gitea/gitea/blob/v1.27.3/routers/api/actions/job_summary.go) already caps at [`MaxJobSummarySize`](https://github.com/go-gitea/gitea/blob/v1.27.3/models/actions/run_job_summary.go) (1 MiB) with `io.LimitReader`. [`parseProtobufBody`](https://github.com/go-gitea/gitea/blob/v1.27.3/routers/api/actions/artifactsv4.go) in artifact v4 does `io.ReadAll(ctx.Req.Body)` with no cap. CreateArtifact, Finalize, List, Get, Delete all go through it. A random user PAT is not enough. You need a **running Actions job token**. Fork-PR jobs still `NeedApproval` on 1.27.3.
+
+**Job-summary learned `LimitReader`. Artifact v4 did not copy it. A live job can POST a 12 MiB CreateArtifact and Gitea buffers the lot.**
 
 | | |
 |---|---|
-| ID | Unpublished Gitea source finding #7 (no CVE yet) |
+| ID | no CVE yet |
 | CWE | [CWE-400](https://cwe.mitre.org/data/definitions/400.html) |
 | CVSS | **Medium: 6.5** `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` |
 | Product | [Gitea](https://github.com/go-gitea/gitea) |
-| Affected | all versions **through 1.27.3** (inclusive) |
-| Patched | vendor patch — see references |
-| Auth | authenticated (see source map) |
+| Affected | through **v1.27.3** (`146cc3e`) with Actions enabled |
+| Auth | running Actions job token |
 | License | [GNU Affero GPL v3.0](LICENSE) |
-| Lab | `127.0.0.1` only · vendor/client disclosure pack, not a scanner |
+| Lab | `127.0.0.1` only |
 
----
+## What an attacker can do
 
-## Advisory (from the source map)
+From a **running Actions job** (their own repo, or a fork-PR that already passed `NeedApproval`), POST an arbitrarily large v4 CreateArtifact body and force Gitea to buffer it all. Job-summary on the same instance already rejects anything over 1 MiB.
 
-routers/api/actions/artifactsv4.go parseProtobufBody io.ReadAll(ctx.Req.Body) no cap. Contrast job_summary.go io.LimitReader(..., MaxJobSummarySize+1).
+That is memory pressure on the Gitea process. Lab proved the missing cap (12 MiB -> 200). It did not kill the process. It is not RCE. It is not unauthenticated. A stolen user PAT without a live job does not reach this path.
 
----
+## How I found it
 
-## Entry
+The leftover map after the GHSA wave included Actions body handling. Fork-PR jobs still `NeedApproval` on 1.27.3, so this is not an unauth fork-PR skip. I looked at how the Actions API reads request bodies. Job-summary has a number. Artifact v4 does not.
 
-- **Method:** `POST`
-- **Path:** `/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact`
-- **Router:** Authenticated Actions job token. parseProtobufBody io.ReadAll with no LimitReader. Contrast job_summary.go io.LimitReader MaxJobSummarySize+1.
-- **Notes:** Authenticated unpublished Gitea #7 CWE-400 v1.27.3. Witness: 12 MiB CreateArtifact 200 vs 8 MiB job-summary 400. Not process-kill. Not eval. Not a reverse shell. Fork-PR jobs still need NeedApproval.
+I stood up `gitea/act_runner:0.2.13`, seeded a hold workflow so a job token exists, and POSTed a 12 MiB CreateArtifact. HTTP **200** `ok` plus `signedUploadUrl`. Then 8 MiB job-summary: **400** `invalid summary`. `GET /api/v1/version` still 200. Gitea stayed up. Lab `mem_limit` is 1g. Body capped at 12 MiB so the host is not the experiment. Host executor only. No `docker.sock`.
 
-### Call chain
+Wrong turns already recorded: CreateArtifact without a job token (401 is not the bug); process kill / OOM (SUCCESS is 12 MiB -> 200 while 8 MiB summary -> 400); treating `signedUploadUrl` as RCE; fork-PR unauth; a reverse shell. Theatre.
 
-- `running Actions job token`
-- `POST v4 CreateArtifact 12 MiB → 200 ok + signedUploadUrl`
-- `POST job-summary 8 MiB → 400 invalid summary LimitReader`
-- `GET /api/v1/version still 200`
-
-### Lab preconditions
-
-- Gitea 1.27.3 with Actions enabled
-- Running Actions job token (not a random user PAT)
-- Fork-PR jobs still need NeedApproval on 1.27.3
-
-### Witness
-
-12 MiB CreateArtifact HTTP 200 ok; 8 MiB job-summary HTTP 400 invalid summary; Gitea still up
-
-### Not success
-
-- eval/base64/system payload
-- reverse shell
-- process kill / OOM
-- CreateArtifact without a job token
-
----
-
-## Patch / remediation
-
-**Do this first:** Apply the vendor patch for **Gitea**. See references.
-
-**Verify after upgrade**
-
-- Re-run `gitea-artifact-v4-readall-Abraxas-Labs.py` against the patched build: the mapped witness must **not** appear.
-- Confirm the vendor advisory / changeset in the deployed tree (see references).
-- A WAF signature is delay, not a patch.
-
-**If you cannot update immediately**
-
-- Disable or isolate the affected component.
-- Hunt for the witness condition on production (new privileged users, unexpected files, injected rows — whatever this CVE's map names).
-
----
-
-## Reproduction (authorized lab)
-
-Target **only** `http://127.0.0.1:8088` (or the loopback you bound). Do not point this script at the internet.
-
-```bash
-python3 gitea-artifact-v4-readall-Abraxas-Labs.py
-```
-
-Success is the **witness** above in the response body. Generic 200 HTML is not it.
-
----
-
-## Lab images
-
-Loopback stack used to reproduce. Official images unless a `Dockerfile` in this folder builds from source.
-
-- [`lab/docker-compose.yml`](lab/docker-compose.yml)
-- [`lab/Dockerfile`](lab/Dockerfile)
-- [`lab/run.sh`](lab/run.sh)
+## Lab
 
 ```bash
 cd lab
-docker compose up --force-recreate
+./run.sh
 ```
 
-Bind the vulnerable product tree next to Compose if the YAML mounts a local directory (plugin zip / source tag from the version table). Publish nothing except `127.0.0.1`.
+Target **only** `http://127.0.0.1:18135`. In-compose `ROOT_URL` is `http://gitea:3000/` so the runner can register.
 
----
+```text
+v4-create status=200 sent=12582912
+v4-unbounded-readall=1
+job-summary status=400 sent=8388608 invalid summary cap=MaxJobSummarySize=1048576
+gitea-still-up status=200
+SUCCESS GITEA-ARTIFACT-V4-READALL
+```
+
+## The fix
+
+Wrap `parseProtobufBody` in `io.LimitReader` at a proto-sized cap, same pattern as `MaxJobSummarySize`. 12 MiB CreateArtifact must fail the same class of way 8 MiB job-summary already does.
 
 ## References
 
-- [github.com/go-gitea/gitea](https://github.com/go-gitea/gitea) tag v1.27.3
-
-- Abraxas Labs: [abraxaslabs.tech](https://abraxaslabs.tech) · [github.com/abraxas](https://github.com/abraxas) · [@abraxas_null](https://x.com/abraxas_null)
-
----
-
-## Records (structured)
-
-```
-# Gitea unpublished #7 — artifact v4 unbounded ReadAll
-
-CWE: CWE-400
-Severity: Medium (source review)
-
-## Description
-
-`parseProtobufBody` in artifact v4 does `io.ReadAll(ctx.Req.Body)` with no cap. Job-summary already uses `io.LimitReader` at 1 MiB. A running Actions job token can POST an arbitrarily large CreateArtifact body.
-
-## Product
-
-Gitea 1.27.3. Lab proved the missing cap (12 MiB → 200), not process kill.
-```
-
----
+- [github.com/go-gitea/gitea](https://github.com/go-gitea/gitea) tag [v1.27.3](https://github.com/go-gitea/gitea/releases/tag/v1.27.3)
+- [`artifactsv4.go`](https://github.com/go-gitea/gitea/blob/v1.27.3/routers/api/actions/artifactsv4.go) · [`job_summary.go`](https://github.com/go-gitea/gitea/blob/v1.27.3/routers/api/actions/job_summary.go) · [`MaxJobSummarySize`](https://github.com/go-gitea/gitea/blob/v1.27.3/models/actions/run_job_summary.go)
+- [CWE-400](https://cwe.mitre.org/data/definitions/400.html)
 
 ## License
 
-This disclosure pack is licensed under the **GNU Affero General Public License v3.0**. See [LICENSE](LICENSE).
-
----
-
-## Disclaimer
-
-This pack is for **the vendor, the site owner, and licensed labs**. The script talks to `127.0.0.1`. Using it against systems you do not own is not authorized by Abraxas Labs. No warranty.
-
-<p align="center">
-  <a href="https://abraxaslabs.tech">abraxaslabs.tech</a> ·
-  <a href="https://github.com/abraxas">github.com/abraxas</a> ·
-  <a href="https://x.com/abraxas_null">@abraxas_null</a>
-</p>
+GNU Affero GPL v3.0. See [LICENSE](LICENSE). Loopback lab only. No warranty.
