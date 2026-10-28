@@ -13,6 +13,10 @@
   &nbsp;·&nbsp;
   <a href="https://github.com/abraxas/gitea-artifact-v4-readall">gitea-artifact-v4-readall</a>
 </p>
+<p align="center">
+  Write-up: <a href="https://abraxaslabs.tech/research/gitea-artifact-v4-readall"><strong>https://abraxaslabs.tech/research/gitea-artifact-v4-readall</strong></a>
+</p>
+
 
 # gitea-artifact-v4-readall
 
